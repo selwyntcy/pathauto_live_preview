@@ -1,0 +1,443 @@
+diff --git a/pathauto_live_preview/function.bind.js b/pathauto_live_preview/function.bind.js
+new file mode 100644
+index 0000000..a8435ab
+--- /dev/null
++++ b/pathauto_live_preview/function.bind.js
+@@ -0,0 +1,41 @@
++
++/**
++ * Function.prototype.bind is part of the ECMAScript 5 standard and is available
++ * natively in newer browsers. For older browsers, we provide a backport.
++ * This implementation is based on
++ * http://webreflection.blogspot.com/2010/02/functionprototypebind.html
++ *
++ * See http://drupal.org/node/1025626
++ */
++if (Function.prototype.bind == null) {
++  Function.prototype.bind = (function (slice) {
++    function bind (context) {
++      var self = this;
++      if (1 < arguments.length) {
++        // Extra arguments to send by default.
++        var $arguments = slice.call(arguments, 1);
++        return function () {
++          return self.apply(
++            context,
++            arguments.length ?
++              // If we received more than one argument, send them.
++              $arguments.concat(slice.call(arguments)) :
++              // If there's only one argument, no slice is needed.
++              $arguments
++          );
++        };
++      }
++      // The simplest and most common case is one argument, so we optimize
++      // for that case.
++      return function () {
++        // Even more optimization for when the function is called
++        // without arguments.
++        return arguments.length ? self.apply(context, arguments) : self.call(context);
++        };
++      }
++
++      // Return the named function.
++      return bind;
++
++  }(Array.prototype.slice));
++}
+diff --git a/pathauto_live_preview/pathauto_live_preview.css b/pathauto_live_preview/pathauto_live_preview.css
+new file mode 100644
+index 0000000..daaefb4
+--- /dev/null
++++ b/pathauto_live_preview/pathauto_live_preview.css
+@@ -0,0 +1,19 @@
++
++/**
++ * Preview of the automatic alias.
++ */
++.form-item-path-pathauto-live-preview {
++  display: none; /* Hide from users without JS. Shown via Drupal.states. */
++}
++
++.form-item-path-pathauto-live-preview label {
++  display: inline;
++}
++
++.form-item-path-pathauto-live-preview-ajax-trigger {
++  display: none; /* Hide from user interaction. "Clicked" via JS only. */
++}
++
++.pathauto-live-preview-needs-update {
++  color: #999;
++}
+diff --git a/pathauto_live_preview/pathauto_live_preview.info b/pathauto_live_preview/pathauto_live_preview.info
+new file mode 100644
+index 0000000..487ff9e
+--- /dev/null
++++ b/pathauto_live_preview/pathauto_live_preview.info
+@@ -0,0 +1,4 @@
++name = Pathauto Live Preview
++description = Displays the up-to-date Pathauto alias as content is being edited.
++dependencies[] = pathauto
++core = 7.x
+diff --git a/pathauto_live_preview/pathauto_live_preview.install b/pathauto_live_preview/pathauto_live_preview.install
+new file mode 100644
+index 0000000..d2922fd
+--- /dev/null
++++ b/pathauto_live_preview/pathauto_live_preview.install
+@@ -0,0 +1,18 @@
++<?php
++
++/**
++ * @file
++ * Install, update, and uninstall functions for Pathauto Live Preview.
++ */
++
++/**
++ * Implements hook_install().
++ */
++function pathauto_live_preview_install() {
++  // Set to the same weight as Pathauto.
++  db_update('system')
++    ->fields(array('weight' => 1))
++    ->condition('type', 'module')
++    ->condition('name', 'pathauto_live_preview')
++    ->execute();
++}
+diff --git a/pathauto_live_preview/pathauto_live_preview.js b/pathauto_live_preview/pathauto_live_preview.js
+new file mode 100644
+index 0000000..93116e1
+--- /dev/null
++++ b/pathauto_live_preview/pathauto_live_preview.js
+@@ -0,0 +1,95 @@
++(function ($) {
++
++Drupal.pathautoLivePreview = Drupal.pathautoLivePreview || {};
++
++/**
++ * Attaches behavior to the alias "edit" link to make it uncheck the "automatic alias" checkbox.
++ */
++Drupal.behaviors.pathautoEditLink = {
++  attach: function (context, settings) {
++    $('a#path-alias-edit-link', context).once('path-alias-edit-link', function() {
++      $(this).click(function () {
++        $('input[name="path[pathauto]"]').removeAttr('checked').change();
++        return false;
++      });
++    });
++  }
++};
++
++/**
++ * Attaches behavior to the live alias preview to update itself when changes have been made to the form.
++ *
++ * Also copies the live alias preview to the manual alias input field when the
++ * "automatic alias" checkbox becomes unchecked.
++ */
++Drupal.behaviors.pathautoLivePreview = {
++  attach: function (context, settings) {
++    // Setup the automatic alias preview to stay updated.
++    $('input[name="path[pathauto_live_preview][ajax_trigger]"]').each(function () {
++      if (this.id && settings.ajax[this.id]) {
++        var $ajax_trigger = $(this);
++        var $alias_preview = $('#' + settings.ajax[this.id].wrapper, context);
++        Drupal.pathautoLivePreview.init($alias_preview, $ajax_trigger);
++      }
++    });
++    // Setup the manual alias input field to be initialized with the automatic
++    // alias preview when the "automatic alias" checkbox becomes unchecked.
++    $('input[name="path[pathauto]"]', context).once('pathauto-live-preview', function() {
++      $(this).change(function () {
++        if (!$(this).attr('checked')) {
++          Drupal.pathautoLivePreview.edit($('.pathauto-live-preview', this.form).eq(0), $('input[name="path[alias]"]', this.form).eq(0));
++        }
++      });
++    });
++  }
++};
++
++/**
++ * Makes the alias preview element "live" by binding a form change event handler.
++ *
++ * The form change event handler marks the preview element as needing an update,
++ * and begins polling for when the preview element becomes visible. An AJAX
++ * request is triggered only when the preview element needs an update *and* is
++ * visible, so that AJAX requests aren't wasted updating an invisible element
++ * (e.g., when its vertical tab isn't open).
++ *
++ * @todo Not all form fields impact the Pathauto alias. Instead of binding to a
++ *   form change, this could be optimized to bind only to the form fields that
++ *   affect the alias. This would require the server-side code to determine
++ *   what those fields are based on the token pattern, and identify those fields
++ *   within Drupal.settings.
++ */
++Drupal.pathautoLivePreview.init = function($alias_preview, $ajax_trigger) {
++  $alias_preview.once('pathauto-live-preview', function() {
++    var $form = $($ajax_trigger.get(0).form);
++    $form.one('change', function() {
++      if (!$alias_preview.hasClass('pathauto-live-preview-needs-update')) {
++        $alias_preview.addClass('pathauto-live-preview-needs-update');
++        Drupal.pathautoLivePreview.poll($alias_preview, $ajax_trigger);
++      }
++    });
++  });
++}
++
++/**
++ * Polls for whether the stale alias preview is visible, and when it is, triggers an AJAX request to update it.
++ */
++Drupal.pathautoLivePreview.poll = function($alias_preview, $ajax_trigger) {
++  if ($alias_preview.is(':visible') && $ajax_trigger.is(':enabled')) {
++    $ajax_trigger.change();
++  }
++  else {
++    setTimeout(Drupal.pathautoLivePreview.poll.bind(null, $alias_preview, $ajax_trigger), 1000);
++  }
++}
++
++/**
++ * Copies the current alias preview into the manual alias input field.
++ */
++Drupal.pathautoLivePreview.edit = function($alias_preview, $alias_edit) {
++  if ($alias_preview.length && $alias_edit.length && !$alias_preview.hasClass('pathauto-live-preview-no-alias')) {
++    $alias_edit.val($alias_preview.text());
++  }
++}
++
++})(jQuery);
+diff --git a/pathauto_live_preview/pathauto_live_preview.module b/pathauto_live_preview/pathauto_live_preview.module
+new file mode 100644
+index 0000000..4a13043
+--- /dev/null
++++ b/pathauto_live_preview/pathauto_live_preview.module
+@@ -0,0 +1,230 @@
++<?php
++
++/**
++ * @file
++ * Displays the up-to-date Pathauto alias as content is being edited.
++ */
++
++/**
++ * Implements hook_theme().
++ */
++function pathauto_live_preview_theme() {
++  return array(
++    'pathauto_live_preview_alias' => array(
++      'render element' => 'element',
++    ),
++    'pathauto_live_preview_edit_link' => array(
++      'render element' => 'element',
++    ),
++  );
++}
++
++/**
++ * Implements hook_field_attach_form().
++ */
++function pathauto_live_preview_field_attach_form($entity_type, $entity, &$form, &$form_state, $langcode) {
++  if (isset($form['path']['pathauto']) && isset($form['path']['alias'])) {
++    $module_path = drupal_get_path('module', 'pathauto_live_preview');
++
++    // When the "Automatic alias" checkbox is checked, the Pathauto module
++    // disables, but leaves visible, the manual alias input field. Instead, this
++    // module toggles the visibility between the editable manual alias field,
++    // and a separate element with the live preview of the automatic alias.
++    $form['path']['alias']['#states']['!visible']['input[name="path[pathauto]"]'] = array('checked' => TRUE);
++    $form['path']['pathauto_live_preview'] = array(
++      '#states' => array('visible' => array('input[name="path[pathauto]"]' => array('checked' => TRUE))),
++      '#type' => 'item',
++      '#title' => $form['path']['alias']['#title'],
++      '#weight' => isset($form['path']['alias']['#weight']) ? $form['path']['alias']['#weight'] : 0,
++      '#access' => isset($form['path']['alias']['#access']) ? $form['path']['alias']['#access'] : NULL,
++      '#attached' => array(
++        'js' => array(
++          $module_path . '/function.bind.js',
++          $module_path . '/pathauto_live_preview.js',
++        ),
++        'css' => array(
++          $module_path . '/pathauto_live_preview.css',
++        ),
++      ),
++      // The 'item' element type does not accept user input, so does not
++      // automatically get a #name, but theme_form_element() adds a useful CSS
++      // class based on #name, and we want that.
++      '#name' => 'path][pathauto_live_preview',
++    );
++
++    // Display the current alias. AJAX requests will update this as needed.
++    $form['path']['pathauto_live_preview']['alias'] = array(
++      '#id' => drupal_html_id('pathauto-live-preview'),
++      '#theme' => 'pathauto_live_preview_alias',
++      '#alias' => _pathauto_live_preview_get_alias($entity_type, $entity, $langcode),
++    );
++
++    // Add the triggering element for the AJAX. This element is hidden via CSS,
++    // and auto "clicked" via Javascript when the alias preview needs to be
++    // updated. We do not use a button for this element, because the first
++    // button in a form is the form's default button for when ENTER is pressed
++    // in a textfield, and we don't want this element receiving such behavior.
++    $form['path']['pathauto_live_preview']['ajax_trigger'] = array(
++      '#type' => 'checkbox',
++      '#ajax' => array(
++        'wrapper' =>  $form['path']['pathauto_live_preview']['alias']['#id'],
++        'callback' => 'pathauto_live_preview_ajax_return',
++      ),
++      // Normally, Form API does not execute submit handlers when non-buttons
++      // trigger AJAX submissions. However, to build an updated entity that
++      // Pathauto can use for generating an alias, we need to execute submit
++      // handlers.
++      '#executes_submit_callback' => TRUE,
++      '#submit' => array('pathauto_live_preview_ajax_submit'),
++    );
++
++    // The AJAX response will require the form state to contain what is needed
++    // to generate an updated alias.
++    $form_state['pathauto_live_preview'] = array(
++      'entity_type' => $entity_type,
++      'entity' => $entity,
++      'langcode' => $langcode,
++    );
++
++    // Add an "edit" link to toggle from automatic to manual alias. This link
++    // does the exact same thing as unchecking the "Automatic alias" checkbox:
++    // it's just an extra convenience for the user.
++    $form['path']['pathauto_live_preview']['edit_link'] = array(
++      '#id' => 'path-alias-edit-link',
++      '#title' => t('edit'),
++      '#theme' => 'pathauto_live_preview_edit_link',
++    );
++  }
++}
++
++/**
++ * Implements hook_form_BASE_FORM_ID_alter().
++ *
++ * Routes to pathauto_live_preview_field_attach_form() just as
++ * pathauto_form_node_form_alter() routes to pathauto_field_attach_form().
++ */
++function pathauto_live_preview_form_node_form_alter(&$form, &$form_state) {
++  $node = $form_state['node'];
++  pathauto_live_preview_field_attach_form('node', $node, $form, $form_state, $node->language);
++}
++
++/**
++ * Implements hook_form_FORM_ID_alter().
++ *
++ * Routes to pathauto_live_preview_field_attach_form() just as
++ * pathauto_form_taxonomy_form_term_form_alter() routes to
++ * pathauto_field_attach_form().
++ */
++function pathauto_live_preview_form_taxonomy_form_term_alter(&$form, $form_state) {
++  $term = $form_state['term'];
++  $langcode = isset($term->language) ? $term->language : LANGUAGE_NONE;
++  pathauto_live_preview_field_attach_form('taxonomy_term', $term, $form, $form_state, $langcode);
++}
++
++/**
++ * Returns the HTML of the automatic alias preview.
++ */
++function theme_pathauto_live_preview_alias($variables) {
++  $element = $variables['element'];
++  $attributes = array('id' => $element['#id'], 'class' => array('pathauto-live-preview'));
++  if (isset($element['#alias'])) {
++    $text = $element['#alias'];
++  }
++  else {
++    $text =  t('An automatic alias cannot be generated at this time.');
++    $attributes['class'][] = array('pathauto-live-preview-no-alias');
++  }
++  return '<span' . drupal_attributes($attributes) . '>' . check_plain($text) . '</span>';
++}
++
++/**
++ * Returns the HTML of the edit link to toggle from automatic to manual alias.
++ */
++function theme_pathauto_live_preview_edit_link($variables) {
++  $element = $variables['element'];
++  return '<a href="#"' . drupal_attributes(array('id' => $element['#id'])) . '>' . check_plain($element['#title']) . '</a>';
++}
++
++/**
++ * Form submit handler for updating the Pathauto alias preview.
++ *
++ * Update the form state's entity being edited by the form. After this function
++ * runs, pathauto_alias_preview_ajax_return() is called to generate and return
++ * the updated path alias for the entity.
++ *
++ * This function is called as part of a process to generate a preview of entity
++ * information: the entity is updated in $form_state only, not elsewhere in the
++ * database.
++ *
++ * @see pathauto_alias_preview_ajax_return()
++ */
++function pathauto_live_preview_ajax_submit($form, &$form_state) {
++  // Drupal 7 does not have a completely uniform API for building an entity
++  // from form values.
++  switch ($form['#entity_type']) {
++    case 'node':
++      $form_state['pathauto_live_preview']['entity'] = node_form_submit_build_node($form, $form_state);
++      break;
++    case 'comment':
++      $form_state['pathauto_live_preview']['entity'] = comment_form_submit_build_comment($form, $form_state);
++      break;
++    case 'taxonomy_term':
++      $form_state['pathauto_live_preview']['entity'] = taxonomy_form_term_submit_build_taxonomy_term($form, $form_state);
++      break;
++    default:
++      entity_form_submit_build_entity($form_state['pathauto_live_preview']['entity_type'], $form_state['pathauto_live_preview']['entity'], $form, $form_state);
++      break;
++  }
++}
++
++/**
++ * Form AJAX callback for updating the Pathauto alias preview.
++ */
++function pathauto_live_preview_ajax_return($form, &$form_state) {
++  // If required fields haven't been entered yet, or there's other validation
++  // errors, we can't generate an alias, but there's no need to display error
++  // messages to the user. Calling drupal_get_messages() clears them.
++  if (form_get_errors()) {
++    drupal_get_messages('error');
++    $alias = NULL;
++  }
++  else {
++    $info = $form_state['pathauto_live_preview'];
++    $alias = _pathauto_live_preview_get_alias($info['entity_type'], $info['entity'], $info['langcode']);
++  }
++
++  // Return the updated alias preview.
++  $output = array(
++   '#id' => $form_state['triggering_element']['#ajax']['wrapper'],
++   '#theme' => 'pathauto_live_preview_alias',
++   '#alias' => $alias,
++  );
++
++  // Workaround to avoid an empty status messages <div> from being inserted and
++  // causing a line break.
++  // @todo Remove once http://drupal.org/node/1237012 is fixed.
++  $output = array('#type' => 'ajax', '#commands' => array(ajax_command_insert(NULL, drupal_render($output))));
++
++  return $output;
++}
++
++/**
++ * Returns the Pathauto alias for the entity.
++ */
++function _pathauto_live_preview_get_alias($entity_type, $entity, $langcode) {
++  module_load_include('inc', 'pathauto');
++
++  // Prevent PHP notices for entities with an uninitialized id.
++  $info = entity_get_info($entity_type);
++  $id_key = $info['entity keys']['id'];
++  if (isset($id_key) && !isset($entity->{$id_key})) {
++    $entity->{$id_key} = NULL;
++  }
++  $uri = entity_uri($entity_type, $entity);
++
++  list(, , $bundle) = entity_extract_ids($entity_type, $entity);
++  $alias = pathauto_create_alias($entity_type, 'return', $uri['path'], array($entity_type => $entity), $bundle, $langcode);
++
++  // Empty string is not a valid alias.
++  return strlen($alias) ? $alias : NULL;
++}
