@@ -132,7 +132,7 @@ function theme_pathauto_live_preview_alias($variables) {
   }
   else {
     $text =  t('An automatic alias cannot be generated at this time.');
-    $attributes['class'][] = array('pathauto-live-preview-no-alias');
+    $attributes['class'][] = 'pathauto-live-preview-no-alias';
   }
   return '<span' . drupal_attributes($attributes) . '>' . check_plain($text) . '</span>';
 }
